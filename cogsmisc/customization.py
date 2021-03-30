@@ -138,7 +138,9 @@ class CollectableManagementGroup(commands.Group):
             return await ctx.send(embed=embed)
 
     async def list(self, ctx):
-        embed = EmbedWithAuthor(ctx)
+        embed = first_embed = EmbedWithAuthor(ctx)
+        fields = 0
+        out = [embed]
 
         has_at_least_1 = False
 
@@ -146,8 +148,8 @@ class CollectableManagementGroup(commands.Group):
         user_obj_names = list(user_objs.keys())
         if user_obj_names:
             has_at_least_1 = True
-            embeds.add_fields_from_long_text(embed, f"Your {self.obj_name_pl.title()}",
-                                             ', '.join(sorted(user_obj_names)))
+            fields += embeds.add_fields_from_long_text(embed, f"Your {self.obj_name_pl.title()}",
+                                                       ', '.join(sorted(user_obj_names)))
 
         async for subscription_doc in self.workshop_sub_meth(ctx):
             try:
@@ -158,13 +160,19 @@ class CollectableManagementGroup(commands.Group):
                 has_at_least_1 = True
                 embed.add_field(name=the_collection.name, value=', '.join(sorted(ab['name'] for ab in bindings)),
                                 inline=False)
+                fields += 1
+                if fields > embeds.MAX_NUM_FIELDS:
+                    embed = discord.Embed(colour=embed.colour)
+                    fields = 0
+                    out.append(embed)
 
         if not has_at_least_1:
-            embed.description = f"You have no {self.obj_name_pl}. Check out the [Alias Workshop]" \
-                                "(https://avrae.io/dashboard/workshop) to get some, " \
-                                "or [make your own](https://avrae.readthedocs.io/en/latest/aliasing/api.html)!"
+            first_embed.description = f"You have no {self.obj_name_pl}. Check out the [Alias Workshop]" \
+                                      "(https://avrae.io/dashboard/workshop) to get some, " \
+                                      "or [make your own](https://avrae.readthedocs.io/en/latest/aliasing/api.html)!"
 
-        return await ctx.send(embed=embed)
+        for e in out:
+            await ctx.send(embed=e)
 
     async def delete(self, ctx, name):
         if self.before_edit_check:
@@ -178,7 +186,6 @@ class CollectableManagementGroup(commands.Group):
         await obj.delete(ctx.bot.mdb)
         await ctx.send(f'{self.obj_name.capitalize()} {name} removed.')
 
-    @checks.feature_flag('command.alias-subscribe.enabled')
     async def subscribe(self, ctx, url):
         coll_match = re.match(r'(?:https?://)?avrae\.io/dashboard/workshop/([0-9a-f]{24})(?:$|/)', url)
         if coll_match is None:
@@ -211,11 +218,14 @@ class CollectableManagementGroup(commands.Group):
         if self.before_edit_check:
             await self.before_edit_check(ctx)
 
+        # counter: how many objects are currently bound to a given name?
+        # used to assign index of new name
         name_indices = Counter()
         for name in await self.personal_cls.get_ctx_map(ctx):
             name_indices[name] += 1
 
-        renamed = []
+        rename_tris = []  # (old name, new name, collection name)
+        to_do = []
 
         async for subscription_doc in self.workshop_sub_meth(ctx):
             doc_changed = False
@@ -227,18 +237,29 @@ class CollectableManagementGroup(commands.Group):
                     new_name = f"{binding['name']}-{new_index}"
                     # do rename
                     binding['name'] = new_name
-                    renamed.append(
-                        f"`{old_name}` ({the_collection.name}) is now `{new_name}`")
+                    rename_tris.append((old_name, new_name, the_collection.name))
                     doc_changed = True
                 name_indices[old_name] += 1
 
-            if doc_changed:  # write the new subscription object to the db
+            if doc_changed:  # queue writing the new subscription object to the db
                 update_meth = the_collection.update_alias_bindings if self.is_alias \
                     else the_collection.update_snippet_bindings
-                await update_meth(ctx, subscription_doc)
+                # this creates a Coroutine object that is not executed until it is awaited by asyncio.gather below
+                # the magic of coroutines!
+                to_do.append(update_meth(ctx, subscription_doc))
 
-        the_renamed = '\n'.join(renamed)
-        await ctx.send(f"Renamed {len(renamed)} {self.obj_name_pl}!\n{the_renamed}")
+        # confirm mass change
+        changes = '\n'.join([f"`{old}` ({collection}) -> `{new}`" for old, new, collection in rename_tris])
+        response = await confirm(ctx, f"This will rename {len(rename_tris)} {self.obj_name_pl}. "
+                                      f"Do you want to continue?\n"
+                                      f"{changes}")
+        if not response:
+            return await ctx.send("Ok, aborting.")
+
+        # execute the pending changes
+        await asyncio.gather(*to_do)
+        the_renamed = '\n'.join([f"`{old}` ({collection}) is now `{new}`" for old, new, collection in rename_tris])
+        await ctx.send(f"Renamed {len(rename_tris)} {self.obj_name_pl}!\n{the_renamed}")
 
     async def rename(self, ctx, old_name, new_name):
         if self.before_edit_check:
@@ -436,7 +457,7 @@ class Customization(commands.Cog):
         invoke_without_command=True,
         help="""
         Creates a snippet to use in certain commands.
-        Ex: *!snippet sneak -d "2d6[Sneak Attack]"* can be used as *!a sword sneak*.
+        Ex: *!snippet sneak -d "2d6[slashing]"* can be used as *!a sword sneak*.
 
         If a user and a server have snippets with the same name, the user snippet will take priority.
 

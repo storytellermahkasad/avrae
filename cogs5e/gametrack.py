@@ -9,17 +9,16 @@ import collections
 import logging
 
 import d20
-import discord
 from discord.ext import commands
 
 from aliasing import helpers
-from cogs5e.funcs import targetutils
 from cogs5e.models.character import Character, CustomCounter
 from cogs5e.models.embeds import EmbedWithCharacter
 from cogs5e.models.errors import ConsumableException, CounterOutOfBounds, InvalidArgument, NoSelectionElements
+from cogs5e.utils import checkutils, targetutils
+from cogs5e.utils.help_constants import *
 from gamedata.lookuputils import get_spell_choices, select_spell_full
 from utils.argparser import argparse
-from utils.dice import d20_with_adv
 from utils.functions import confirm, search, search_and_select, try_delete
 
 log = logging.getLogger(__name__)
@@ -31,6 +30,7 @@ class GameTrack(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ===== bot commands =====
     @commands.group(name='game', aliases=['g'])
     async def game(self, ctx):
         """Commands to help track character information in a game. Use `!help game` to view subcommands."""
@@ -73,9 +73,10 @@ class GameTrack(commands.Cog):
             embed.description = f"__**Remaining Level {level} Spell Slots**__\n" \
                                 f"{character.spellbook.slots_str(level)}"
         else:
+            old_slots = character.spellbook.get_slots(level)
             try:
                 if value.startswith(('+', '-')):
-                    value = character.spellbook.get_slots(level) + int(value)
+                    value = old_slots + int(value)
                 else:
                     value = int(value)
             except ValueError:
@@ -87,7 +88,7 @@ class GameTrack(commands.Cog):
             character.spellbook.set_slots(level, value)
             await character.commit(ctx)
             embed.description = f"__**Remaining Level {level} Spell Slots**__\n" \
-                                f"{character.spellbook.slots_str(level)}"
+                                f"{character.spellbook.slots_str(level)} ({(value - old_slots):+})"
         await ctx.send(embed=embed)
 
     async def _rest(self, ctx, rest_type, *args):
@@ -240,54 +241,47 @@ class GameTrack(commands.Cog):
         See `!help save`."""
         character: Character = await Character.from_ctx(ctx)
 
+        embed = EmbedWithCharacter(character, name=False)
+
+        args = await helpers.parse_snippets(args, ctx)
+        args = await helpers.parse_with_character(ctx, character, args)
         args = argparse(args)
-        adv = args.adv()
-        b = args.join('b', '+')
-        phrase = args.join('phrase', '\n')
-        dc = args.last('dc', 10, int)
+        checkutils.update_csetting_args(character, args)
+        caster, _, _ = await targetutils.maybe_combat(ctx, character, args)
+        result = checkutils.run_save('death', caster, args, embed)
 
-        if b:
-            save_roll = d20.roll(f"{d20_with_adv(adv)}+{b}")
-        else:
-            save_roll = d20.roll(d20_with_adv(adv))
-
-        embed = discord.Embed()
-        embed.title = args.last('title', '') \
-                          .replace('[name]', character.name) \
-                          .replace('[sname]', 'Death') \
-                      or f'{character.name} makes a Death Save!'
-        embed.colour = character.get_color()
-
+        dc = result.skill_roll_result.dc or 10
         death_phrase = ''
-        if save_roll.crit == d20.CritType.CRIT:
-            character.hp = 1
-        elif save_roll.crit == d20.CritType.FAIL:
-            character.death_saves.fail(2)
-        elif save_roll.total >= dc:
-            character.death_saves.succeed()
-        else:
-            character.death_saves.fail()
 
-        if save_roll.crit == d20.CritType.CRIT:
-            death_phrase = f"{character.name} is UP with 1 HP!"
-        elif character.death_saves.is_dead():
-            death_phrase = f"{character.name} is DEAD!"
-        elif character.death_saves.is_stable():
-            death_phrase = f"{character.name} is STABLE!"
+        for save_roll in result.skill_roll_result.rolls:
+            if save_roll.crit == d20.CritType.CRIT:
+                character.hp = 1
+            elif save_roll.crit == d20.CritType.FAIL:
+                character.death_saves.fail(2)
+            elif save_roll.total >= dc:
+                character.death_saves.succeed()
+            else:
+                character.death_saves.fail()
 
-        await character.commit(ctx)
-        embed.description = save_roll.result + (f'\n*{phrase}*' if phrase else '')
+            if save_roll.crit == d20.CritType.CRIT:
+                death_phrase = f"{character.name} is UP with 1 HP!"
+                break
+            elif character.death_saves.is_dead():
+                death_phrase = f"{character.name} is DEAD!"
+                break
+            elif character.death_saves.is_stable():
+                death_phrase = f"{character.name} is STABLE!"
+                break
+
         if death_phrase:
             embed.set_footer(text=death_phrase)
-        if dc != 10:
-            embed.description = f"**DC {dc}**\n" + embed.description
+        embed.add_field(name="Death Saves", value=str(character.death_saves), inline=False)
 
-        embed.add_field(name="Death Saves", value=str(character.death_saves))
-
-        if args.last('image') is not None:
-            embed.set_thumbnail(url=args.last('image'))
-
+        await character.commit(ctx)
         await ctx.send(embed=embed)
+        await try_delete(ctx.message)
+        if gamelog := self.bot.get_cog('GameLog'):
+            await gamelog.send_save(ctx, character, result.skill_name, result.rolls)
 
     @game_deathsave.command(name='success', aliases=['s', 'save'])
     async def game_deathsave_save(self, ctx):
@@ -579,32 +573,14 @@ class GameTrack(commands.Cog):
         else:
             await self._rest(ctx, 'all', *args)
 
-    @commands.command(pass_context=True)
+    @commands.command(pass_context=True, help=f"""
+    Casts a spell.
+    __**Valid Arguments**__
+    {VALID_SPELLCASTING_ARGS}
+    
+    {VALID_AUTOMATION_ARGS}
+    """)
     async def cast(self, ctx, spell_name, *, args=''):
-        """Casts a spell.
-        __Valid Arguments__
-        -i - Ignores Spellbook restrictions, for demonstrations or rituals.
-        -l <level> - Specifies the level to cast the spell at.
-        noconc - Ignores concentration requirements.
-        -h - Hides rolled values.
-        **__Save Spells__**
-        -dc <Save DC> - Overrides the spell save DC.
-        -dc <+X/-X> - Modifies the DC by a certain amount.
-        -save <Save type> - Overrides the spell save type.
-        -d <damage> - Adds additional damage.
-        pass - Target automatically succeeds save.
-        fail - Target automatically fails save.
-        adv/dis - Target makes save at advantage/disadvantage.
-        **__Attack Spells__**
-        See `!a`.
-        **__All Spells__**
-        -phrase <phrase> - adds flavor text.
-        -title <title> - changes the title of the cast. Replaces [sname] with spell name.
-        -thumb <url> - adds an image to the cast.
-        -dur <duration> - changes the duration of any effect applied by the spell.
-        -mod <spellcasting mod> - sets the value of the spellcasting ability modifier.
-        int/wis/cha - different skill base for DC/AB (will not account for extra bonuses)
-        """
         await try_delete(ctx.message)
 
         char: Character = await Character.from_ctx(ctx)
@@ -626,7 +602,7 @@ class GameTrack(commands.Cog):
         caster, targets, combat = await targetutils.maybe_combat(ctx, char, args)
         result = await spell.cast(ctx, caster, targets, args, combat=combat)
 
-        embed = result['embed']
+        embed = result.embed
         embed.colour = char.get_color()
         if 'thumb' not in args:
             embed.set_thumbnail(url=char.image)
@@ -636,6 +612,8 @@ class GameTrack(commands.Cog):
         if combat:
             await combat.final()
         await ctx.send(embed=embed)
+        if (gamelog := self.bot.get_cog('GameLog')) and result.automation_result:
+            await gamelog.send_automation(ctx, char, spell.name, result.automation_result)
 
 
 def setup(bot):

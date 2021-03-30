@@ -94,7 +94,8 @@ class CustomCounter:
                  'hp': "Gaining HP"}
 
     def __init__(self, character, name, value, minv=None, maxv=None, reset=None, display_type=None, live_id=None,
-                 reset_to=None, reset_by=None, title=None, desc=None):
+                 reset_to=None, reset_by=None, title=None, desc=None,
+                 ddb_source_feature_type=None, ddb_source_feature_id=None):
         self._character = character
         self.name = name
 
@@ -108,7 +109,10 @@ class CustomCounter:
         self.reset_to = reset_to
         self.reset_by = reset_by
         self.display_type = display_type
+
         self.live_id = live_id
+        self.ddb_source_feature_type = ddb_source_feature_type
+        self.ddb_source_feature_id = ddb_source_feature_id
 
         # cached values
         self._max_value = None
@@ -121,7 +125,9 @@ class CustomCounter:
     def to_dict(self):
         return {"name": self.name, "value": self._value, "minv": self.min, "maxv": self.max, "reset": self.reset_on,
                 "display_type": self.display_type, "live_id": self.live_id, "reset_to": self.reset_to,
-                "reset_by": self.reset_by, "title": self.title, "desc": self.desc}
+                "reset_by": self.reset_by, "title": self.title, "desc": self.desc,
+                "ddb_source_feature_type": self.ddb_source_feature_type,
+                "ddb_source_feature_id": self.ddb_source_feature_id}
 
     @classmethod
     def new(cls, character, name, minv=None, maxv=None, reset=None, display_type=None, live_id=None,
@@ -134,8 +140,10 @@ class CustomCounter:
             raise InvalidArgument("Bubble display requires a max and min value.")
 
         # sanity checks
-        if maxv is None and reset not in ('none', None):
-            raise InvalidArgument("Reset passed but no maximum passed.")
+        if reset not in ('none', None) and (maxv is None and
+                                            reset_to is None and
+                                            reset_by is None):
+            raise InvalidArgument("Reset passed but no valid reset value (`max`, `resetto`, `resetby`) passed.")
         if reset_to is not None and reset_by is not None:
             raise InvalidArgument("Both `resetto` and `resetby` arguments found.")
 
@@ -161,7 +169,7 @@ class CustomCounter:
 
         if reset_by is not None:
             try:
-                d20.parse(reset_by)
+                d20.parse(str(reset_by))
             except d20.RollSyntaxError:
                 raise InvalidArgument(f"{reset_by} (`resetby`) cannot be interpreted as a number or dice string.")
 

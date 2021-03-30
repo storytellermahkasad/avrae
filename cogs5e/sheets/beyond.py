@@ -83,10 +83,17 @@ class BeyondSheetParser(SheetLoaderABC):
         race = self._get_race()
         background = self._get_background()
 
+        # ddb campaign
+        campaign = self.character_data.get('campaign')
+        campaign_id = None
+        if campaign is not None:
+            campaign_id = str(campaign['id'])
+
         character = Character(
             owner_id, upstream, active, sheet_type, import_version, name, description, image, stats, levels, attacks,
             skills, resistances, saves, ac, max_hp, hp, temp_hp, cvars, options, overrides, consumables, death_saves,
-            spellbook, live, race, background
+            spellbook, live, race, background,
+            ddb_campaign_id=campaign_id
         )
         return character
 
@@ -250,12 +257,23 @@ class BeyondSheetParser(SheetLoaderABC):
             live_id = f"{cons['id']}-{cons['typeId']}"
             display_type = 'bubble' if cons['max'] < 7 else None
             reset = RESET_MAP.get(cons['reset'], 'long')
-            name = cons['name'].replace('\u2019', "'")
+            name = cons['name'].replace('\u2019', "'").strip()
+            desc = cons['desc'].replace('\u2019', "'") if cons['desc'] is not None else None
+            source_feature_type = cons['sourceFeatureType']
+            source_feature_id = cons['sourceFeatureId']
+
+            source_feature = compendium.lookup_entity(source_feature_type, source_feature_id)
+            log.debug(f"Processed counter named {name!r} for feature {source_feature}")
+
+            if source_feature is None:
+                log.warning(f"Could not find source feature ({source_feature_type}, {source_feature_id}) for counter "
+                            f"named {name!r}")
 
             if cons['max'] and name:  # don't make counters with a range of 0 - 0, or blank named counters
                 out.append(
                     CustomCounter(None, name, cons['value'], minv='0', maxv=str(cons['max']), reset=reset,
-                                  display_type=display_type, live_id=live_id)
+                                  display_type=display_type, live_id=live_id, desc=desc,
+                                  ddb_source_feature_type=source_feature_type, ddb_source_feature_id=source_feature_id)
                 )
 
         return [cc.to_dict() for cc in out]

@@ -25,6 +25,9 @@ class Trait:
 
 
 class Monster(StatBlock, Sourced):
+    entity_type = 'monster'
+    type_id = 779871897
+
     def __init__(self, name: str, size: str, race: str, alignment: str, ac: int, armortype: str, hp: int, hitdice: str,
                  speed: str, ability_scores: BaseStats, saves: Saves, skills: Skills, senses: str,
                  display_resists: Resistances, condition_immune: list, languages: list, cr: str, xp: int,
@@ -60,11 +63,11 @@ class Monster(StatBlock, Sourced):
             resistances = Resistances.from_dict(dict(vuln=vuln, resist=resist, immune=immune))
 
         try:
-            levels = Levels({"Monster": spellcasting.caster_level or int(cr)})
+            levels = Levels({"Monster": floatify_cr(cr)})
         except ValueError:
-            levels = None
+            levels = Levels({"Monster": 0})
 
-        Sourced.__init__(self, 'monster', homebrew, source=kwargs['source'],
+        Sourced.__init__(self, homebrew, source=kwargs['source'],
                          entity_id=kwargs.get('entity_id'), page=kwargs.get('page'), url=kwargs.get('url'),
                          is_free=kwargs.get('is_free'))
         StatBlock.__init__(
@@ -343,6 +346,10 @@ def _calc_prof(stats, saves, skills):
     if prof is not None:
         return prof
     return 0
+
+
+def floatify_cr(cr: str) -> float:
+    return {'1/8': 0.125, '1/4': 0.25, '1/2': 0.5}.get(cr) or float(cr)
 
 
 # ===== spellcasting =====

@@ -1,7 +1,6 @@
 import collections
 import functools
 import logging
-import random
 import traceback
 
 import discord
@@ -10,7 +9,6 @@ from discord.ext import commands
 from discord.ext.commands import NoPrivateMessage
 
 from aliasing import helpers
-from cogs5e.funcs import attackutils, checkutils, targetutils
 from cogs5e.models.character import Character
 from cogs5e.models.embeds import EmbedWithAuthor, EmbedWithCharacter
 from cogs5e.models.errors import InvalidArgument, NoSelectionElements, SelectionException
@@ -18,10 +16,12 @@ from cogs5e.models.initiative import Combat, Combatant, CombatantGroup, Effect, 
 from cogs5e.models.sheet.attack import Attack
 from cogs5e.models.sheet.base import Skill
 from cogs5e.models.sheet.resistance import Resistances
+from cogs5e.utils import attackutils, checkutils, targetutils
+from cogs5e.utils.help_constants import *
 from cogsmisc.stats import Stats
 from gamedata.lookuputils import select_monster_full, select_spell_full
 from utils import constants
-from utils.argparser import argparse, argsplit
+from utils.argparser import argparse
 from utils.functions import confirm, get_guild_member, search_and_select, try_delete
 
 log = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class InitTracker(commands.Cog):
         """Begins combat in the channel the command is invoked.
         Usage: !init begin <ARGS (opt)>
         __Valid Arguments__
-        dyn - Dynamic initiative; Rerolls all initiatves at the start of a round.
+        dyn - Dynamic initiative; Rerolls all initiatives at the start of a round.
         turnnotif - Notifies the controller of the next combatant in initiative.
         deathdelete - Disables deleting monsters below 0 hp.
         -name <name> - Sets a name for the combat instance."""
@@ -81,7 +81,6 @@ class InitTracker(commands.Cog):
             options['deathdelete'] = True
 
         temp_summary_msg = await ctx.send("```Awaiting combatants...```")
-        Combat.message_cache[temp_summary_msg.id] = temp_summary_msg  # add to cache
 
         combat = Combat.new(str(ctx.channel.id), temp_summary_msg.id, str(ctx.author.id), options, ctx)
         await combat.final()
@@ -329,13 +328,14 @@ class InitTracker(commands.Cog):
         p = args.last('p', type_=int)
         group = args.last('group')
         note = args.last('note')
+        check_result = None
 
         if p is None:
             args.ignore('rr')
             args.ignore('dc')
             checkutils.update_csetting_args(char, args, char.skills.initiative)
-            totals = checkutils.run_check('initiative', char, args, embed)
-            init = totals[-1]
+            check_result = checkutils.run_check('initiative', char, args, embed)
+            init = check_result.rolls[-1].total
         else:
             init = p
             embed.title = "{} already rolled initiative!".format(char.name)
@@ -366,6 +366,8 @@ class InitTracker(commands.Cog):
 
         await combat.final()
         await ctx.send(embed=embed)
+        if (gamelog := self.bot.get_cog('GameLog')) and check_result is not None:
+            await gamelog.send_check(ctx, me.character, check_result.skill_name, check_result.rolls)
 
     @init.command(name="next", aliases=['n'])
     async def nextInit(self, ctx):
@@ -513,9 +515,8 @@ class InitTracker(commands.Cog):
             combat.round_num = 0
 
         # repost summary message
-        old_summary = await combat.get_summary_msg()
+        old_summary = combat.get_summary_msg()
         new_summary = await ctx.send(combat.get_summary())
-        Combat.message_cache[new_summary.id] = new_summary  # add to cache
         combat.summary = new_summary.id
         try:
             await new_summary.pin()
@@ -684,22 +685,11 @@ class InitTracker(commands.Cog):
 
         @option()
         async def group(combatant):
-            current = combat.current_combatant
-            was_current = combatant is current or \
-                          (isinstance(current, CombatantGroup) and combatant in current and len(current) == 1)
             group_name = args.last('group')
-            combat.remove_combatant(combatant, ignore_remove_hook=True)
-            if group_name.lower() == 'none':
-                combat.add_combatant(combatant)
-                if was_current:
-                    combat.goto_turn(combatant, True)
+            new_group = combatant.set_group(group_name=group_name)
+            if new_group is None:
                 return f"\u2705 {combatant.name} removed from all groups."
-            else:
-                c_group = combat.get_group(group_name, create=combatant.init)
-                c_group.add_combatant(combatant)
-                if was_current:
-                    combat.goto_turn(combatant, True)
-                return f"\u2705 {combatant.name} added to group {c_group.name}."
+            return f"\u2705 {combatant.name} added to group {new_group.name}."
 
         @option(pass_group=True)
         async def name(combatant):
@@ -934,6 +924,7 @@ class InitTracker(commands.Cog):
         -immune <damage type> - Gives the combatant immunity to the given damage type.
         -vuln <damage type> - Gives the combatant vulnerability to the given damage type.`-custom` - Makes a custom attack with 0 to hit and base damage. Use `-b` and `-d` to add damage and to hit.
         -neutral <damage type> - Removes the combatant's immunity, resistance, or vulnerability to the given damage type.
+        magical - Makes all damage from the combatant magical
         __General__
         -ac <ac> - modifies ac temporarily; adds if starts with +/- or sets otherwise.
         -sb <save bonus> - Adds a bonus to all saving throws.
@@ -1011,45 +1002,13 @@ class InitTracker(commands.Cog):
         await ctx.send(out)
         await combat.final()
 
-    @init.group(aliases=['a'], invoke_without_command=True)
+    @init.group(aliases=['a'], invoke_without_command=True, help=f"""
+    Rolls an attack against another combatant.
+    __**Valid Arguments**__
+    {VALID_AUTOMATION_ARGS}
+    -custom - Makes a custom attack with 0 to hit and base damage. Use `-b` and `-d` to add to hit and damage.
+    """)
     async def attack(self, ctx, atk_name, *, args=''):
-        """Rolls an attack against another combatant.
-        __Valid Arguments__
-        -t "<target>" - Sets targets for the attack. You can pass as many as needed.
-        -t "<target>|<args>" - Sets a target, and also allows for specific args to apply to them. (e.g, -t "OR1|hit" to force the attack against OR1 to hit)
-
-        *adv/dis* - Give advantage or disadvantage to the attack roll(s).
-        *ea* - Elven Accuracy, double advantage on the attack roll.
-
-        *-b <bonus>* - Adds a bonus to hit.
-
-        -criton <value> - The number the attack crits on if rolled on or above.
-        *-d <damage>* - Adds additional damage.
-        *-c <damage>* - Adds additional damage for when the attack crits, not doubled.
-        -rr <value> - How many attacks to make at the target.
-        *-mi <value>* - Minimum value of each die on the damage roll.
-
-        *-resist <damage type>* - Gives the target resistance to the given damage type.
-        *-immune <damage type>* - Gives the target immunity to the given damage type.
-        *-vuln <damage type>* - Gives the target vulnerability to the given damage type.
-        *-neutral <damage type>* - Removes the targets immunity, resistance, or vulnerability to the given damage type.
-
-        *hit* - The attack automatically hits.
-        *miss* - The attack automatically misses.
-        *crit* - The attack automatically crits.
-        *nocrit* - Nullifies critical hits.
-        *max* - Maximizes damage rolls.
-
-        -h - Hides rolled values.
-        -phrase <phrase> - Adds flavor text.
-        -title <title> - Changes the title of the attack. Replaces [name] with attackers name and [aname] with the attacks name.
-        -f "Field Title|Field Text" - Creates a field with the given title and text.
-        -thumb <url> - Adds a thumbnail to the attack.
-        [user snippet] - Allows the user to use snippets on the attack.
-
-        -custom - Makes a custom attack with 0 to hit and base damage. Use `-b` and `-d` to add to hit and damage.
-
-        An italicized argument means the argument supports ephemeral arguments - e.g. `-d1` applies damage to the first hit, `-b1` applies a bonus to one attack, and so on."""
         return await self._attack(ctx, None, atk_name, args)
 
     @attack.command(name="list")
@@ -1073,51 +1032,17 @@ class InitTracker(commands.Cog):
             destination = ctx.message.author
         return await destination.send("{}'s attacks:\n{}".format(combatant.name, atk_str))
 
-    @init.command()
+    @init.command(help=f"""
+    Rolls an attack against another combatant.
+    __**Valid Arguments**__
+    {VALID_AUTOMATION_ARGS}
+    -custom - Makes a custom attack with 0 to hit and base damage. Use `-b` and `-d` to add to hit and damage.
+    """)
     async def aoo(self, ctx, combatant_name, atk_name, *, args=''):
-        """Rolls an attack of opportunity against another combatant.
-        __Valid Arguments__
-        -t "<target>" - Sets targets for the attack. You can pass as many as needed.
-        -t "<target>|<args>" - Sets a target, and also allows for specific args to apply to them. (e.g, -t "OR1|hit" to force the attack against OR1 to hit)
-
-        *adv/dis* - Give advantage or disadvantage to the attack roll(s).
-        *ea* - Elven Accuracy, double advantage on the attack roll.
-
-        *-b <bonus>* - Adds a bonus to hit.
-
-        -criton <value> - The number the attack crits on if rolled on or above.
-        *-d <damage>* - Adds additional damage.
-        *-c <damage>* - Adds additional damage for when the attack crits, not doubled.
-        -rr <value> - How many attacks to make at the target.
-        *-mi <value>* - Minimum value on the attack roll.
-
-        *-resist <damage type>* - Gives the target resistance to the given damage type.
-        *-immune <damage type>* - Gives the target immunity to the given damage type.
-        *-vuln <damage type>* - Gives the target vulnerability to the given damage type.
-        *-neutral <damage type>* - Removes the targets immunity, resistance, or vulnerability to the given damage type.
-
-        *hit* - The attack automatically hits.
-        *miss* - The attack automatically misses.
-        *crit* - The attack automatically crits.
-        *nocrit* - Nullifies critical hits.
-        *max* - Maximizes damage rolls.
-
-        -h - Hides rolled values.
-        -phrase <phrase> - Adds flavor text.
-        -title <title> - Changes the title of the attack. Replaces [name] with attackers name and [aname] with the attacks name.
-        -f "Field Title|Field Text" - Creates a field with the given title and text.
-        -thumb <url> - Adds a thumbnail to the attack.
-        [user snippet] - Allows the user to use snippets on the attack.
-
-        -custom - Makes a custom attack with 0 to hit and base damage. Use `-b` and `-d` to add to hit and damage.
-
-        An italicized argument means the argument supports ephemeral arguments - e.g. `-d1` applies damage to the first hit, `-b1` applies a bonus to one attack, and so on."""
         return await self._attack(ctx, combatant_name, atk_name, args)
 
-    @staticmethod
-    async def _attack(ctx, combatant_name, atk_name, unparsed_args):
+    async def _attack(self, ctx, combatant_name, atk_name, unparsed_args):
         args = await helpers.parse_snippets(unparsed_args, ctx)
-        raw_args = argsplit(unparsed_args)
         combat = await Combat.from_ctx(ctx)
 
         # attacker handling
@@ -1138,12 +1063,6 @@ class InitTracker(commands.Cog):
         else:
             args = await helpers.parse_with_statblock(ctx, combatant, args)
         args = argparse(args)
-
-        # handle old targeting method
-        target_name = None
-        if 't' not in args and len(raw_args) > 0:
-            target_name = atk_name
-            atk_name = raw_args[0]
 
         # attack selection/caster handling
         try:
@@ -1170,37 +1089,22 @@ class InitTracker(commands.Cog):
             return await ctx.send("Attack not found.")
 
         # target handling
-        if 't' not in args and target_name is not None:
-            # old single-target
-            targets = []
-            try:
-                target = await combat.select_combatant(target_name, "Select the target.", select_group=True)
-                if isinstance(target, CombatantGroup):
-                    targets.extend(target.get_combatants())
-                else:
-                    targets.append(target)
-            except SelectionException:
-                return await ctx.send("Target not found.")
-            await ctx.author.send(f"You are using the old targeting syntax, which is deprecated. "
-                                  f"In the future, you should use "
-                                  f"`{ctx.prefix}init attack {atk_name} -t {target_name}`!")
-        else:
-            # multi-targeting
-            targets = await targetutils.definitely_combat(combat, args, allow_groups=True)
+        targets = await targetutils.definitely_combat(combat, args, allow_groups=True)
 
         # embed setup
         embed = discord.Embed(color=combatant.get_color())
 
         # run
-        await attackutils.run_attack(ctx, embed, args, caster, attack, targets, combat)
-
+        result = await attackutils.run_attack(ctx, embed, args, caster, attack, targets, combat)
         await ctx.send(embed=embed)
+        if (gamelog := self.bot.get_cog('GameLog')) and is_player:
+            await gamelog.send_automation(ctx, combatant.character, attack.name, result)
 
-    @init.command(aliases=['c'])
+    @init.command(aliases=['c'], help=f"""
+    Rolls an ability check as the current combatant.
+    {VALID_CHECK_ARGS}
+    """)
     async def check(self, ctx, check, *args):
-        """
-        Rolls an ability check as the current combatant. See `!help check` for valid arguments.
-        """
         combat = await Combat.from_ctx(ctx)
         combatant = combat.current_combatant
         if combatant is None:
@@ -1212,16 +1116,18 @@ class InitTracker(commands.Cog):
         args = await helpers.parse_snippets(args, ctx)
         args = argparse(args)
 
-        checkutils.run_check(skill_key, combatant, args, embed)
+        result = checkutils.run_check(skill_key, combatant, args, embed)
 
         await ctx.send(embed=embed)
         await try_delete(ctx.message)
+        if (gamelog := self.bot.get_cog('GameLog')) and isinstance(combatant, PlayerCombatant):
+            await gamelog.send_check(ctx, combatant.character, result.skill_name, result.rolls)
 
-    @init.command(aliases=['s'])
+    @init.command(aliases=['s'], help=f"""
+    Rolls an ability save as the current combatant.
+    {VALID_SAVE_ARGS}
+    """)
     async def save(self, ctx, save, *args):
-        """
-        Rolls an ability save as the current combatant. See `!help save` for valid arguments.
-        """
         combat = await Combat.from_ctx(ctx)
         combatant = combat.current_combatant
         if combatant is None:
@@ -1231,72 +1137,35 @@ class InitTracker(commands.Cog):
         args = await helpers.parse_snippets(args, ctx)
         args = argparse(args)
 
-        checkutils.run_save(save, combatant, args, embed)
+        result = checkutils.run_save(save, combatant, args, embed)
 
         # send
         await ctx.send(embed=embed)
         await try_delete(ctx.message)
+        if (gamelog := self.bot.get_cog('GameLog')) and isinstance(combatant, PlayerCombatant):
+            await gamelog.send_save(ctx, combatant.character, result.skill_name, result.rolls)
 
-    @init.command()
+    @init.command(help=f"""
+    Casts a spell against another combatant.
+    __**Valid Arguments**__
+    {VALID_SPELLCASTING_ARGS}
+    
+    {VALID_AUTOMATION_ARGS}
+    """)
     async def cast(self, ctx, spell_name, *, args=''):
-        """Casts a spell against another combatant.
-        __Valid Arguments__
-        -t "<target>" - Sets targets for the spell. You can pass as many as needed.
-        -t "<target>|<args>" - Sets a target, and also allows for specific args to apply to them. (e.g, -t "OR1|hit" to force the attack against OR1 to hit)
-
-        -i - Ignores Spellbook restrictions, for demonstrations or rituals.
-        -l <level> - Specifies the level to cast the spell at.
-        noconc - Ignores concentration requirements.
-        -h - Hides rolled values.
-        **__Save Spells__**
-        -dc <Save DC> - Overrides the spell save DC.
-        -save <Save type> - Overrides the spell save type.
-        -d <damage> - Adds additional damage.
-        pass - Target automatically succeeds save.
-        fail - Target automatically fails save.
-        adv/dis - Target makes save at advantage/disadvantage.
-        **__Attack Spells__**
-        See `!a`.
-        **__All Spells__**
-        -phrase <phrase> - adds flavor text.
-        -title <title> - changes the title of the cast. Replaces [sname] with spell name.
-        -thumb <url> - adds an image to the cast.
-        -dur <duration> - changes the duration of any effect applied by the spell.
-        -mod <spellcasting mod> - sets the value of the spellcasting ability modifier.
-        int/wis/cha - different skill base for DC/AB (will not account for extra bonuses)"""
         return await self._cast(ctx, None, spell_name, args)
 
-    @init.command(aliases=['rc'])
+    @init.command(aliases=['rc'], help=f"""
+    Casts a spell against another combatant.
+    __**Valid Arguments**__
+    {VALID_SPELLCASTING_ARGS}
+    
+    {VALID_AUTOMATION_ARGS}
+    """)
     async def reactcast(self, ctx, combatant_name, spell_name, *, args=''):
-        """Casts a spell against another combatant, as a reaction.
-        __Valid Arguments__
-        -t "[target]" - Sets targets for the spell. You can pass as many as needed.
-        -t "[target]|[args]" - Sets a target, and also allows for specific args to apply to them. (e.g, -t "OR1|hit" to force the attack against OR1 to hit)
-
-        -i - Ignores Spellbook restrictions, for demonstrations or rituals.
-        -l <level> - Specifies the level to cast the spell at.
-        noconc - Ignores concentration requirements.
-        -h - Hides rolled values.
-        **__Save Spells__**
-        -dc <Save DC> - Overrides the spell save DC.
-        -save <Save type> - Overrides the spell save type.
-        -d <damage> - Adds additional damage.
-        pass - Target automatically succeeds save.
-        fail - Target automatically fails save.
-        adv/dis - Target makes save at advantage/disadvantage.
-        **__Attack Spells__**
-        See `!a`.
-        **__All Spells__**
-        -phrase <phrase> - adds flavor text.
-        -title <title> - changes the title of the cast. Replaces [sname] with spell name.
-        -thumb <url> - adds an image to the cast.
-        -dur <duration> - changes the duration of any effect applied by the spell.
-        -mod <spellcasting mod> - sets the value of the spellcasting ability modifier.
-        int/wis/cha - different skill base for DC/AB (will not account for extra bonuses)"""
         return await self._cast(ctx, combatant_name, spell_name, args)
 
-    @staticmethod
-    async def _cast(ctx, combatant_name, spell_name, args):
+    async def _cast(self, ctx, combatant_name, spell_name, args):
         args = await helpers.parse_snippets(args, ctx)
         combat = await Combat.from_ctx(ctx)
 
@@ -1335,10 +1204,12 @@ class InitTracker(commands.Cog):
 
         result = await spell.cast(ctx, combatant, targets, args, combat=combat)
 
-        embed = result['embed']
+        embed = result.embed
         embed.colour = combatant.get_color()
         await ctx.send(embed=embed)
         await combat.final()
+        if (gamelog := self.bot.get_cog('GameLog')) and is_character and result.automation_result:
+            await gamelog.send_automation(ctx, combatant.character, spell.name, result.automation_result)
 
     @init.command(name='remove')
     async def remove_combatant(self, ctx, *, name: str):
@@ -1383,7 +1254,7 @@ class InitTracker(commands.Cog):
                 await ctx.author.send(f"End of combat report: {combat.round_num} rounds "
                                       f"{combat.get_summary(True)}")
 
-                summary = await combat.get_summary_msg()
+                summary = combat.get_summary_msg()
                 await summary.edit(content=combat.get_summary() + " ```-----COMBAT ENDED-----```")
                 await summary.unpin()
             except:
