@@ -202,7 +202,7 @@ class InitTracker(commands.Cog):
         __Valid Arguments__
         adv/dis - Give advantage or disadvantage to the initiative roll.
         -b <condition bonus> - Adds a bonus to the combatant's initiative roll.
-        -n <number> - Adds more than one of that monster.
+        -n <number or dice> - Adds more than one of that monster. Supports dice.
         -p <value> - Places combatant at the given value, instead of rolling.
         -name <name> - Sets the combatant's name. Use "#" for auto-numbering, e.g. "Orc#"
         -h - Hides HP, AC, Resists, etc. Default: True.
@@ -227,7 +227,7 @@ class InitTracker(commands.Cog):
         hp = args.last('hp', type_=int)
         thp = args.last('thp', type_=int)
         ac = args.last('ac', type_=int)
-        n = args.last('n', 1, int)
+        n = args.last('n', 1)
         note = args.last('note')
         name_template = args.last('name', monster.name[:2].upper() + '#')
         init_skill = monster.skills.initiative
@@ -236,7 +236,15 @@ class InitTracker(commands.Cog):
 
         out = ''
         to_pm = ''
-        recursion = 25 if n > 25 else 1 if n < 1 else n
+
+        try: # Attempt to get the add as a number
+            n_result = int(n)
+        except ValueError: # if we're not a number, are we dice
+            roll_result = roll(str(n))
+            n_result = roll_result.total
+            out += f"Rolling random number of combatants: {roll_result}\n"
+
+        recursion = 25 if n_result > 25 else 1 if n_result < 1 else n_result
 
         name_num = 1
         for i in range(recursion):
@@ -472,13 +480,7 @@ class InitTracker(commands.Cog):
     @init.command(name="skipround", aliases=['round', 'skiprounds'])
     async def skipround(self, ctx, numrounds: int = 1):
         """Skips one or more rounds of initiative."""
-
         combat = await Combat.from_ctx(ctx)
-
-        if len(combat.get_combatants()) == 0:
-            return await ctx.send("There are no combatants.")
-        if combat.index is None:
-            return await ctx.send(f"Please start combat with `{ctx.prefix}init next` first.")
 
         toRemove = []
         for co in combat.get_combatants():
@@ -488,7 +490,10 @@ class InitTracker(commands.Cog):
         messages = combat.skip_rounds(numrounds)
         out = messages
 
-        out.append(combat.get_turn_str())
+        if (turn_str := combat.get_turn_str()) is not None:
+            out.append(turn_str)
+        else:
+            out.append(combat.get_summary())
 
         for co in toRemove:
             combat.remove_combatant(co)
@@ -922,7 +927,7 @@ class InitTracker(commands.Cog):
         __Resists__
         -resist <damage type> - Gives the combatant resistance to the given damage type.
         -immune <damage type> - Gives the combatant immunity to the given damage type.
-        -vuln <damage type> - Gives the combatant vulnerability to the given damage type.`-custom` - Makes a custom attack with 0 to hit and base damage. Use `-b` and `-d` to add damage and to hit.
+        -vuln <damage type> - Gives the combatant vulnerability to the given damage type.
         -neutral <damage type> - Removes the combatant's immunity, resistance, or vulnerability to the given damage type.
         magical - Makes all damage from the combatant magical
         __General__

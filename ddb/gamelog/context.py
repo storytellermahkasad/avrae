@@ -1,5 +1,7 @@
 import logging
 
+import discord
+
 from cogs5e.models.character import Character
 from cogs5e.models.errors import NoCharacter
 from ddb.gamelog.errors import IgnoreEvent
@@ -98,7 +100,10 @@ class GameLogEventContext:
     async def trigger_typing(self):
         """Sends typing to the correct destination(s), accounting for message's scope."""
         destination = await self.destination_channel()
-        return await destination.trigger_typing()
+        try:
+            await destination.trigger_typing()
+        except discord.HTTPException as e:
+            log.warning(f"Could not trigger typing in channel {destination!r}: {e}")
 
     async def send(self, *args, **kwargs):
         """Sends content to the correct destination(s), accounting for message's scope."""
@@ -136,7 +141,7 @@ class GameLogEventContext:
         """
         if not self.event.entity_id:
             return None
-        return compendium.lookup_by_entitlement('monster', int(self.event.entity_id))
+        return compendium.lookup_entity('monster', int(self.event.entity_id))
 
     async def get_statblock(self):
         """:rtype: cogs5e.models.sheet.statblock.StatBlock or None"""

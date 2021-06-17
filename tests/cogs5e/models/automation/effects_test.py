@@ -6,6 +6,7 @@ import pytest
 from aliasing.evaluators import SpellEvaluator
 from cogs5e.models import automation
 from cogs5e.models.sheet.statblock import StatBlock
+from gamedata.compendium import compendium
 from tests.utils import active_character
 
 log = logging.getLogger(__name__)
@@ -42,6 +43,34 @@ async def test_save_strs(dc):
     assert result
 
 
+# ==== Text ====
+class TestText:
+    async def test_valid_entityreference(self, character, avrae, dhttp):
+        avrae.message(
+            '!a import {"name":"Text Test","automation":[{"type": "text", "text": {"id": 75, "typeId": 12168134}}],"_v":2}')
+        avrae.message('!a "Text Test"')
+        await dhttp.drain()
+
+    async def test_missing_entitlement_entityreference(self, character, avrae, dhttp):
+        avrae.message(
+            '!a import {"name":"Text Test2","automation":[{"type": "text", "text": {"id": -75, "typeId": 12168134}}],"_v":2}')
+        avrae.message('!a "Text Test2"')
+        await dhttp.drain()
+
+    async def test_invalid_entityreference(self, character, avrae, dhttp):
+        avrae.message(
+            '!a import {"name":"Text Test3","automation":[{"type": "text", "text": {"id": -9999999, "typeId": 12168134}}],"_v":2}')
+        avrae.message('!a "Text Test3"')
+        await dhttp.drain()
+
+    async def test_invalid2_entityreference(self, character, avrae, dhttp):
+        avrae.message(
+            '!a import {"name":"Text Test4","automation":[{"type": "text", "text": {"id": 2102, "typeId": 1118725998}}],"_v":2}')
+        await dhttp.drain()
+        avrae.message('!a "Text Test4"')
+        await dhttp.drain()
+
+
 # ==== UseCounter ====
 class TestUseCustomCounter:
     async def test_e2e(self, character, avrae, dhttp):
@@ -49,6 +78,8 @@ class TestUseCustomCounter:
             '!a import {"name": "UseCounter Test", "automation": [{"type": "counter", "counter": "Bardic Inspiration", "amount": "1"}], "_v": 2}')
         avrae.message(
             '!a import {"name": "UseCounter Test2", "automation": [{"type": "counter", "counter": {"slot": 3}, "amount": "1"}], "_v": 2}')
+        avrae.message(
+            '!a import {"name": "UseCounter Test3", "automation": [{"type": "counter", "counter": {"id": 75, "typeId": 12168134}, "amount": "1"}], "_v": 2}')
         await dhttp.drain()
 
         avrae.message('!a "UseCounter Test"')
@@ -56,11 +87,19 @@ class TestUseCustomCounter:
         char = await active_character(avrae)
         if bi := char.get_consumable("Bardic Inspiration"):
             assert bi.value < bi.get_max()
+            avrae.message('!cc reset "Bardic Inspiration"')
+            await dhttp.drain()
 
         avrae.message('!a "UseCounter Test2"')
         await dhttp.drain()
         char = await active_character(avrae)
         assert char.spellbook.get_slots(3) == 0 or char.spellbook.get_slots(3) < char.spellbook.get_max_slots(3)
+
+        avrae.message('!a "UseCounter Test3"')
+        await dhttp.drain()
+        char = await active_character(avrae)
+        if bi := char.get_consumable("Bardic Inspiration"):
+            assert bi.value < bi.get_max()
 
     async def test_deserialize(self):
         data = {
@@ -94,32 +133,37 @@ class TestUseCustomCounter:
         }
         result = automation.UseCounter.from_data(data)
         assert result
-        assert isinstance(result.counter, automation.utils.SpellSlotReference)
+        assert isinstance(result.counter, automation.effects.usecounter.SpellSlotReference)
         assert result.counter.slot == 3
 
-        # data = {
-        #     'type': 'counter',
-        #     'counter': {'feature': 'class', 'featureId': 1},
-        #     'amount': '5'
-        # }
-        # assert automation.UseCounter.from_data(data)
+        data = {
+            'type': 'counter',
+            'counter': {'id': 75, 'typeId': 12168134},
+            'amount': '5'
+        }
+        result = automation.UseCounter.from_data(data)
+        assert result
+        assert isinstance(result.counter, automation.effects.usecounter.AbilityReference)
+        assert result.counter.entity is compendium.lookup_entity(12168134, 75)
 
     async def test_serialize(self):
         result = automation.UseCounter('Bardic Inspiration', '1').to_dict()
         assert json.dumps(result)  # result should be JSON-encodable
 
-        result = automation.UseCounter(automation.utils.SpellSlotReference(1), '1').to_dict()
+        result = automation.UseCounter(automation.effects.usecounter.SpellSlotReference(1), '1').to_dict()
         assert json.dumps(result)
 
-        # result = automation.UseCounter(automation.utils.FeatureReference('class', 1), '1').to_dict()
-        # assert json.dumps(result)
+        result = automation.UseCounter(automation.effects.usecounter.AbilityReference(12168134, 75), '1').to_dict()
+        assert json.dumps(result)
 
     @pytest.mark.parametrize("counter", [
         # counters by name
         "counter", "other counter name",
         # spell slot
-        automation.utils.SpellSlotReference(1), automation.utils.SpellSlotReference(9)
-        # feature (todo)
+        automation.effects.usecounter.SpellSlotReference(1), automation.effects.usecounter.SpellSlotReference(9),
+        # ability reference
+        automation.effects.usecounter.AbilityReference(12168134, 75),
+        automation.effects.usecounter.AbilityReference(-1, -1)
     ])
     @pytest.mark.parametrize("amount", [
         # valid inputs

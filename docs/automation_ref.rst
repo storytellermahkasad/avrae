@@ -72,6 +72,8 @@ It must be inside a Target effect.
 - ``lastAttackDidHit`` (:class:`bool`) Whether the attack hit.
 - ``lastAttackDidCrit`` (:class:`bool`) If the attack hit, whether it crit.
 - ``lastAttackRollTotal`` (:class:`int`) The result of the last to-hit roll (0 if no roll was made).
+- ``lastAttackNaturalRoll`` (:class:`int`) The natural roll of the last to-hit roll (e.g. `10` in `1d20 (10) + 5 = 15`;
+  0 if no roll was made).
 
 Save
 ----
@@ -107,7 +109,10 @@ It must be inside a Target effect.
 **Variables**
 
 - ``lastSaveDidPass`` (:class:`bool`) Whether the target passed the save.
+- ``lastSaveDC`` (:class:`int`) The DC of the last save roll.
 - ``lastSaveRollTotal`` (:class:`int`) The result of the last save roll (0 if no roll was made).
+- ``lastSaveNaturalRoll`` (:class:`int`) The natural roll of the last save roll (e.g. `10` in `1d20 (10) + 5 = 15`;
+  0 if no roll was made).
 
 Damage
 ------
@@ -262,14 +267,17 @@ Text
 
     {
         type: "text";
-        text: AnnotatedString;
+        text: AnnotatedString | AbilityReference;
     }
 
 Outputs a short amount of text in the resulting embed.
 
 .. attribute:: text
 
-    An AnnotatedString detailing the text to display.
+    Either:
+
+    - An AnnotatedString (the text to display).
+    - An AbilityReference (see :ref:`AbilityReference`). Displays the ability's description in whole.
 
 Set Variable
 ------------
@@ -349,7 +357,7 @@ Use Counter
 
     {
         type: "counter";
-        counter: string | SpellSlotReference;
+        counter: string | SpellSlotReference | AbilityReference;
         amount: IntExpression;
         allowOverflow?: boolean;
         errorBehaviour?: null | "warn" | "raise";
@@ -390,9 +398,11 @@ Uses a number of charges of the given counter, and displays the remaining amount
 
 **Variables**
 
-- ``lastCounterName`` (:class:`str`) The name of the last used counter (if it was a spell slot, the level of the slot, ``None`` on error).
+- ``lastCounterName`` (:class:`str`) The name of the last used counter. If it was a spell slot, the level of the slot (safe to cast to int, i.e. ``int(lastCounterName)``). (``None`` on error).
 - ``lastCounterRemaining`` (:class:`int`) The remaining charges of the last used counter (0 on error).
 - ``lastCounterUsedAmount`` (:class:`int`) The amount of the counter successfully used.
+- ``lastCounterRequestedAmount`` (:class:`int`) The amount of the counter requested to be used (i.e. the amount
+  specified by automation or requested by ``-amt``, regardless of the presence of the ``-i`` arg).
 
 .. _SpellSlotReference:
 
@@ -409,29 +419,84 @@ SpellSlotReference
 
     The level of the spell slot to reference (``[1..9]``).
 
-.. todo
-    .. _FeatureReference:
+.. _AbilityReference:
 
-    FeatureReference
-    ^^^^^^^^^^^^^^^^
+AbilityReference
+^^^^^^^^^^^^^^^^
 
-    .. code-block:: typescript
+.. code-block:: typescript
 
-        {
-            feature: "class" | "race" | "item";
-            featureId: number;
-        }
+    {
+        id: number;
+        typeId: number;
+    }
 
-    In most cases, a ``FeatureReference`` should not be constructed manually; use the Automation editor to select a
-    feature instead.
+In most cases, an ``AbilityReference`` should not be constructed manually; use the Automation editor to select an
+ability instead. A list of valid abilities can be retrieved from the API at ``/gamedata/limiteduse``.
 
-    .. attribute:: feature
+.. note::
+    The Automation Engine will make a best effort at discovering the appropriate counter to use for the
+    given ability - in most cases this won't affect the chosen counter, but in some cases, it may
+    lead to some unexpected behaviour. Some examples of counter discovery include:
 
-        The type of feature referenced.
+    - Choosing ``Channel Divinity (Paladin)`` may discover a counter granted by the Cleric's Channel Divinity feature
+    - Choosing ``Breath Weapon (Gold)`` may discover a counter for a breath weapon of a different color
+    - Choosing ``Sorcery Points (Sorcerer)`` may discover a counter granted by the Metamagic Adept feat
 
-    .. attribute:: featureId
+.. attribute:: id
 
-        The DDB entity ID of the feature referenced.
+    The ID of the ability referenced.
+
+.. attribute:: typeId
+
+    The DDB entity type ID of the ability referenced.
+
+Cast Spell
+----------
+.. versionadded:: 2.11.0
+
+.. code-block:: typescript
+
+    {
+        type: "spell";
+        id: int;
+        level?: int;
+        dc?: IntExpression;
+        attackBonus?: IntExpression;
+        castingMod?: IntExpression;
+    }
+
+Executes the given spell's automation as if it were immediately cast. Does not use a spell
+slot to cast the spell. Can only be used at the root of automation. Cannot be used inside a spell's automation.
+
+This is usually used in features that cast spells using alternate resources (i.e. Use Counter, Cast Spell).
+
+.. attribute:: id
+
+    The DDB entity id of the spell to cast. Use the ``/gamedata/spells`` API endpoint to retrieve a list of valid IDs.
+
+.. attribute:: level
+
+    *optional* - The (slot) level to cast the spell at.
+
+.. attribute:: dc
+
+    *optional* - The saving throw DC to use when casting the spell. If not provided, defaults to the caster's default
+    spellcasting DC (or any DC specified in the spell automation).
+
+.. attribute:: attackBonus
+
+    *optional* - The spell attack bonus to use when casting the spell. If not provided, defaults to the caster's
+    default spell attack bonus (or any attack bonus specified in the spell automation).
+
+.. attribute:: castingMod
+
+    *optional* - The spellcasting modifier to use when casting the spell. If not provided, defaults to the caster's
+    default spellcasting modifier.
+
+**Variables**
+
+No variables are exposed.
 
 AnnotatedString
 ---------------

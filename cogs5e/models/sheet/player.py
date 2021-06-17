@@ -146,6 +146,8 @@ class CustomCounter:
             raise InvalidArgument("Reset passed but no valid reset value (`max`, `resetto`, `resetby`) passed.")
         if reset_to is not None and reset_by is not None:
             raise InvalidArgument("Both `resetto` and `resetby` arguments found.")
+        if not name.strip():
+            raise InvalidArgument("The name of the counter can not be empty.")
 
         min_value = None
         if minv is not None:
@@ -307,6 +309,9 @@ class CustomCounter:
                 out = str(self.value)
 
         return out
+
+    def __repr__(self):
+        return f"<{type(self).__name__} name={self.name!r} __str__={self!s}>"
 
 
 CustomCounterResetResult = collections.namedtuple('CustomCounterResetResult',

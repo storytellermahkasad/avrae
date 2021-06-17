@@ -4,7 +4,9 @@ Created on Jan 30, 2017
 @author: andrew
 """
 import asyncio
+import io
 import re
+import d20
 import textwrap
 from collections import Counter
 
@@ -19,10 +21,28 @@ from cogs5e.models.character import Character
 from cogs5e.models.embeds import EmbedWithAuthor
 from cogs5e.models.errors import InvalidArgument, NoCharacter, NotAllowed
 from utils import checks
-from utils.functions import auth_and_chan, confirm, get_selection, user_from_id
+from utils.functions import confirm, get_selection, user_from_id
+from utils.constants import DAMAGE_TYPES, STAT_NAMES, STAT_ABBREVIATIONS, SKILL_NAMES
+
 
 ALIASER_ROLES = ("server aliaser", "dragonspeaker")
 
+STAT_VAR_NAMES = ("armor",
+                  "charisma", "charismaMod", "charismaSave",
+                  "constitution", "constitutionMod", "constitutionSave",
+                  "description",
+                  "dexterity", "dexterityMod", "dexteritySave",
+                  "hp", "image",
+                  "intelligence", "intelligenceMod", "intelligenceSave",
+                  "level", "name", "proficiencyBonus",
+                  "strength", "strengthMod", "strengthSave",
+                  "wisdom", "wisdomMod", "wisdomSave")
+
+SPECIAL_ARGS = {'crit', 'nocrit', 'hit', 'miss', 'ea', 'adv', 'dis', 'pass', 'fail', 'noconc', 'max', 'magical'
+                'strengthsave', 'dexteritysave', 'constitutionsave', 'intelligencesave', 'wisdomsave', 'charismasave'}
+
+# Don't use any iterables with a string as only element. It will add all the chars instead of the string
+SPECIAL_ARGS.update(DAMAGE_TYPES, STAT_NAMES, STAT_ABBREVIATIONS, SKILL_NAMES, STAT_VAR_NAMES)
 
 class CollectableManagementGroup(commands.Group):
     def __init__(self, func=None, *, personal_cls, workshop_cls, workshop_sub_meth, is_alias, is_server,
@@ -33,7 +53,7 @@ class CollectableManagementGroup(commands.Group):
         :type workshop_sub_meth: Coroutine
         :type is_alias: bool
         :type is_server: bool
-        :type before_edit_check: Coroutine[Context, Optional[str]] -> None
+        :type before_edit_check: Coroutine[Context, Optional[str], bool] -> None
         """
         if func is None:
             func = self.create_or_view
@@ -117,9 +137,13 @@ class CollectableManagementGroup(commands.Group):
         if collectable is None:
             return await ctx.send(f"No {self.obj_name} named {name} found.")
         elif isinstance(collectable, self.personal_cls):  # personal
-            out = f'**{name}**: ```py\n{ctx.prefix}{self.obj_copy_command} {collectable.name} {collectable.code}\n```'
-            out = out if len(out) <= 2000 else f'**{collectable.name}**:\nCommand output too long to display.'
-            return await ctx.send(out)
+            await send_long_code_text(
+                ctx,
+                outside_codeblock=f'**{name}**:',
+                inside_codeblock=f"{ctx.prefix}{self.obj_copy_command} {collectable.name} {collectable.code}",
+                codeblock_language='py'
+            )
+            return
         else:  # collection
             embed = EmbedWithAuthor(ctx)
             the_collection = await collectable.load_collection(ctx)
@@ -158,13 +182,14 @@ class CollectableManagementGroup(commands.Group):
                 continue
             if bindings := subscription_doc[self.binding_key]:
                 has_at_least_1 = True
-                embed.add_field(name=the_collection.name, value=', '.join(sorted(ab['name'] for ab in bindings)),
-                                inline=False)
-                fields += 1
-                if fields > embeds.MAX_NUM_FIELDS:
+                if fields >= embeds.MAX_NUM_FIELDS:
                     embed = discord.Embed(colour=embed.colour)
                     fields = 0
                     out.append(embed)
+
+                embed.add_field(name=the_collection.name, value=', '.join(sorted(ab['name'] for ab in bindings)),
+                                inline=False)
+                fields += 1
 
         if not has_at_least_1:
             first_embed.description = f"You have no {self.obj_name_pl}. Check out the [Alias Workshop]" \
@@ -176,7 +201,7 @@ class CollectableManagementGroup(commands.Group):
 
     async def delete(self, ctx, name):
         if self.before_edit_check:
-            await self.before_edit_check(ctx, name)
+            await self.before_edit_check(ctx, name, delete=True)
 
         obj = await self.personal_cls.get_named(name, ctx)
         if obj is None:
@@ -263,7 +288,7 @@ class CollectableManagementGroup(commands.Group):
 
     async def rename(self, ctx, old_name, new_name):
         if self.before_edit_check:
-            await self.before_edit_check(ctx)
+            await self.before_edit_check(ctx, new_name)
 
         self.personal_cls.precreate_checks(new_name, '')
 
@@ -310,12 +335,12 @@ def _can_edit_servaliases(ctx):
            checks.author_is_owner(ctx)
 
 
-async def _alias_before_edit(ctx, name=None):
+async def _alias_before_edit(ctx, name=None, delete=False):
     if name and name in ctx.bot.all_commands:
         raise InvalidArgument(f"`{name}` is already a builtin command. Try another name.")
 
 
-async def _servalias_before_edit(ctx, name=None):
+async def _servalias_before_edit(ctx, name=None, delete=False):
     if not _can_edit_servaliases(ctx):
         raise NotAllowed("You do not have permission to edit server aliases. Either __Administrator__ "
                          "Discord permissions or a role named \"Server Aliaser\" or \"Dragonspeaker\" "
@@ -323,11 +348,35 @@ async def _servalias_before_edit(ctx, name=None):
     await _alias_before_edit(ctx, name)
 
 
-async def _servsnippet_before_edit(ctx, _=None):
+async def _servsnippet_before_edit(ctx, name=None, delete=False):
     if not _can_edit_servaliases(ctx):
         raise NotAllowed("You do not have permission to edit server snippets. Either __Administrator__ "
                          "Discord permissions or a role named \"Server Aliaser\" or \"Dragonspeaker\" "
                          "is required.")
+    await _snippet_before_edit(ctx, name, delete)
+
+
+async def _snippet_before_edit(ctx, name=None, delete=False):
+    if delete:
+        return
+    confirmation = None
+    # special arg checking
+    if not name:
+        return
+    name = name.lower()
+    if name in SPECIAL_ARGS or name.startswith('-'):
+        confirmation = f"**Warning:** Creating a snippet named `{name}` will prevent you from using the built-in `{name}` argument in Avrae commands.\nAre you sure you want to create this snippet? (yes/no)"
+    # roll string checking
+    try:
+        d20.parse(name)
+    except d20.RollSyntaxError:
+        pass
+    else:
+        confirmation = f"**Warning:** Creating a snippet named `{name}` might cause hidden problems if you try to use the same roll in other commands.\nAre you sure you want to create this snippet? (yes/no)"
+
+    if confirmation is not None:
+        if not await confirm(ctx, confirmation):
+            raise InvalidArgument('Ok, cancelling.')
 
 
 def guild_only_check(ctx):
@@ -353,7 +402,7 @@ class Customization(commands.Cog):
     async def prefix(self, ctx, prefix: str = None):
         """Sets the bot's prefix for this server.
 
-        You must have Manage Server permissions or a role called "Bot Admin" to use this command.
+        You must have Manage Server permissions or a role called "Bot Admin" to use this command. Due to a possible Discord conflict, a prefix beginning with `/` will require confirmation.
 
         Forgot the prefix? Reset it with "@Avrae#6944 prefix !".
         """
@@ -364,6 +413,12 @@ class Customization(commands.Cog):
 
         if not checks._role_or_permissions(ctx, lambda r: r.name.lower() == 'bot admin', manage_guild=True):
             return await ctx.send("You do not have permissions to change the guild prefix.")
+
+        # Check for Discord Slash-command conflict
+        if prefix.startswith('/'):
+            if not await confirm(ctx, f"Setting a prefix that begins with / may cause issues. "
+                       "Are you sure you want to continue?"):
+                return await ctx.send("Ok, cancelling.")
 
         # insert into cache
         self.bot.prefixes[guild_id] = prefix
@@ -418,12 +473,12 @@ class Customization(commands.Cog):
     @alias.command(name='deleteall', aliases=['removeall'])
     async def alias_deleteall(self, ctx):
         """Deletes ALL user aliases."""
-        await ctx.send("This will delete **ALL** of your personal user aliases "
-                       "(it will not affect workshop subscriptions). "
-                       "Are you *absolutely sure* you want to continue?\n"
-                       "Type `Yes, I am sure` to confirm.")
-        reply = await self.bot.wait_for('message', timeout=30, check=auth_and_chan(ctx))
-        if not reply.content == "Yes, I am sure":
+        if not await confirm(
+                ctx,
+                f"This will delete **ALL** of your personal user aliases (it will not affect workshop subscriptions). "
+                f"Are you *absolutely sure* you want to continue?\n"
+                f"Type `Yes, I am sure` to confirm.",
+                response_check=lambda r: r == "Yes, I am sure"):
             return await ctx.send("Unconfirmed. Aborting.")
 
         await self.bot.mdb.aliases.delete_many({"owner": str(ctx.author.id)})
@@ -453,6 +508,7 @@ class Customization(commands.Cog):
         workshop_sub_meth=workshop.WorkshopCollection.my_subs,
         is_alias=False,
         is_server=False,
+        before_edit_check=_snippet_before_edit,
         name='snippet',
         invoke_without_command=True,
         help="""
@@ -467,11 +523,12 @@ class Customization(commands.Cog):
     @snippet.command(name='deleteall', aliases=['removeall'])
     async def snippet_deleteall(self, ctx):
         """Deletes ALL user snippets."""
-        await ctx.send("This will delete **ALL** of your user snippets. "
-                       "Are you *absolutely sure* you want to continue?\n"
-                       "Type `Yes, I am sure` to confirm.")
-        reply = await self.bot.wait_for('message', timeout=30, check=lambda m: auth_and_chan(ctx)(m))
-        if not reply.content == "Yes, I am sure":
+        if not await confirm(
+                ctx,
+                f"This will delete **ALL** of your personal user snippets (it will not affect workshop subscriptions). "
+                f"Are you *absolutely sure* you want to continue?\n"
+                "Type `Yes, I am sure` to confirm.",
+                response_check=lambda r: r == "Yes, I am sure"):
             return await ctx.send("Unconfirmed. Aborting.")
 
         await self.bot.mdb.snippets.delete_many({"owner": str(ctx.author.id)})
@@ -551,7 +608,7 @@ class Customization(commands.Cog):
             cvar = character.get_scope_locals().get(name)
             if cvar is None:
                 return await ctx.send("This cvar is not defined.")
-            return await ctx.send(f'**{name}**: ```\n{cvar}\n```')
+            return await send_long_code_text(ctx, outside_codeblock=f'**{name}**:', inside_codeblock=cvar)
 
         helpers.set_cvar(character, name, value)
 
@@ -574,15 +631,12 @@ class Customization(commands.Cog):
     async def cvar_deleteall(self, ctx):
         """Deletes ALL character variables for the active character."""
         char: Character = await Character.from_ctx(ctx)
-
-        await ctx.send(f"This will delete **ALL** of your character variables for {char.name}. "
-                       "Are you *absolutely sure* you want to continue?\n"
-                       "Type `Yes, I am sure` to confirm.")
-        try:
-            reply = await self.bot.wait_for('message', timeout=30, check=auth_and_chan(ctx))
-        except asyncio.TimeoutError:
-            reply = None
-        if (not reply) or (not reply.content == "Yes, I am sure"):
+        if not await confirm(
+                ctx,
+                f"This will delete **ALL** of your character variables for {char.name}. "
+                "Are you *absolutely sure* you want to continue?\n"
+                "Type `Yes, I am sure` to confirm.",
+                response_check=lambda r: r == "Yes, I am sure"):
             return await ctx.send("Unconfirmed. Aborting.")
 
         char.cvars = {}
@@ -613,7 +667,7 @@ class Customization(commands.Cog):
             uvar = user_vars.get(name)
             if uvar is None:
                 return await ctx.send("This uvar is not defined.")
-            return await ctx.send(f'**{name}**: ```\n{uvar}\n```')
+            return await send_long_code_text(ctx, outside_codeblock=f'**{name}**:', inside_codeblock=uvar)
 
         if name in STAT_VAR_NAMES or not name.isidentifier():
             return await ctx.send("Could not create uvar: already builtin, or contains invalid character!")
@@ -638,11 +692,12 @@ class Customization(commands.Cog):
     @uservar.command(name='deleteall', aliases=['removeall'])
     async def uvar_deleteall(self, ctx):
         """Deletes ALL user variables."""
-        await ctx.send("This will delete **ALL** of your user variables (uvars). "
-                       "Are you *absolutely sure* you want to continue?\n"
-                       "Type `Yes, I am sure` to confirm.")
-        reply = await self.bot.wait_for('message', timeout=30, check=lambda m: auth_and_chan(ctx)(m))
-        if (not reply) or (not reply.content == "Yes, I am sure"):
+        if not await confirm(
+                ctx,
+                f"This will delete **ALL** of your user variables (uvars). "
+                "Are you *absolutely sure* you want to continue?\n"
+                "Type `Yes, I am sure` to confirm.",
+                response_check=lambda r: r == "Yes, I am sure"):
             return await ctx.send("Unconfirmed. Aborting.")
 
         await self.bot.mdb.uvars.delete_many({"owner": str(ctx.author.id)})
@@ -668,7 +723,7 @@ class Customization(commands.Cog):
             svar = await helpers.get_svar(ctx, name)
             if svar is None:
                 return await ctx.send("This svar is not defined.")
-            return await ctx.send(f'**{name}**: ```\n{svar}\n```')
+            return await send_long_code_text(ctx, outside_codeblock=f'**{name}**:', inside_codeblock=svar)
 
         if not _can_edit_servaliases(ctx):
             return await ctx.send("You do not have permissions to edit server variables. Either __Administrator__ "
@@ -716,12 +771,14 @@ class Customization(commands.Cog):
         gvar = await self.bot.mdb.gvars.find_one({"key": name})
         if gvar is None:
             return await ctx.send("This gvar does not exist.")
-        out = f"**{name}**:\n*Owner: {gvar['owner_name']}* ```\n{gvar['value']}\n```"
-        if len(out) <= 2000:
-            await ctx.send(out)
-        else:
-            await ctx.send(f"**{name}**:\n*Owner: {gvar['owner_name']}*\nThis gvar is too long to display in Discord.\n"
-                           f"You can view it here: <https://avrae.io/dashboard/gvars?lookup={name}>")
+        await send_long_code_text(
+            ctx,
+            outside_codeblock=f"**{name}**:\n*Owner: {gvar['owner_name']}*",
+            inside_codeblock=gvar['value'],
+            too_long_message=f"This gvar is too long to display in a single message. I've "
+                             f"attached it here, but you can also view it at "
+                             f"<https://avrae.io/dashboard/gvars?lookup={name}>."
+        )
 
     @globalvar.command(name='create')
     async def gvar_create(self, ctx, *, value):
@@ -834,17 +891,22 @@ class Customization(commands.Cog):
     #     await ctx.send(file=discord.File(out, f'{address}.txt'))
 
 
+async def send_long_code_text(destination, outside_codeblock, inside_codeblock, codeblock_language='',
+                              too_long_message=None):
+    """Sends *text* to the destination, or if it's too long, embeds it as a txt file and uploads it with a message."""
+    if too_long_message is None:
+        too_long_message = "This output is too large to fit in a message. I've attached it as a file here."
+
+    text = f"{outside_codeblock} ```{codeblock_language}\n{inside_codeblock}\n```"
+
+    if len(text) < 2000:
+        await destination.send(text)
+    elif len(inside_codeblock) < 5 * 10e6:
+        out = io.StringIO(inside_codeblock)
+        await destination.send(f"{outside_codeblock}\n{too_long_message}", file=discord.File(out, 'output.txt'))
+    else:
+        await destination.send("This output is too large.")
+
+
 def setup(bot):
     bot.add_cog(Customization(bot))
-
-
-STAT_VAR_NAMES = ("armor",
-                  "charisma", "charismaMod", "charismaSave",
-                  "constitution", "constitutionMod", "constitutionSave",
-                  "description",
-                  "dexterity", "dexterityMod", "dexteritySave",
-                  "hp", "image",
-                  "intelligence", "intelligenceMod", "intelligenceSave",
-                  "level", "name", "proficiencyBonus",
-                  "strength", "strengthMod", "strengthSave",
-                  "wisdom", "wisdomMod", "wisdomSave")

@@ -1,13 +1,13 @@
 import abc
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import d20
 
 __all__ = (
     'EffectResult', 'AutomationResult',
     'TargetResult', 'AttackResult', 'SaveResult', 'DamageResult', 'TempHPResult', 'IEffectResult', 'RollResult',
-    'TextResult', 'SetVariableResult', 'ConditionResult', 'UseCounterResult'
+    'TextResult', 'SetVariableResult', 'ConditionResult', 'UseCounterResult', 'CastSpellResult'
 )
 
 
@@ -126,4 +126,12 @@ class UseCounterResult(EffectResult):
     counter_name: typing.Optional[str] = None  # None if the counter was not used successfully
     counter_remaining: int = 0
     used_amount: int = 0
+    requested_amount: int = 0
     skipped: bool = False
+
+
+@dataclass(frozen=True)
+class CastSpellResult(EffectResult):
+    success: bool
+    spell: typing.Optional['gamedata.Spell'] = None
+    children: typing.List[EffectResult] = field(default_factory=list)
