@@ -33,7 +33,7 @@ class Attack(Effect):
             raise TargetException("Tried to make an attack without a target! Make sure all Attack effects are inside "
                                   "of a Target effect.")
 
-        # arguments
+        # ==== arguments ====
         args = autoctx.args
         adv = args.adv(ea=True, ephem=True)
         crit = args.last('crit', None, bool, ephem=True) and 1
@@ -47,6 +47,7 @@ class Attack(Effect):
         criton = args.last('criton', 20, int)
         ac = args.last('ac', None, int)
 
+        # ==== caster options ====
         # character-specific arguments
         if autoctx.character:
             if 'reroll' not in args:
@@ -62,6 +63,12 @@ class Attack(Effect):
             elif effect_b:
                 b = effect_b
 
+        # ==== target options ====
+        if autoctx.target.character:
+            # 1556
+            nocrit = nocrit or autoctx.target.character.get_setting("ignorecrit", False)
+
+        # ==== execution ====
         attack_bonus = autoctx.ab_override or autoctx.caster.spellbook.sab
 
         # explicit bonus
@@ -87,6 +94,10 @@ class Attack(Effect):
         did_hit = True
         did_crit = False
         to_hit_roll = None
+
+        # Disable critical damage state for children (#1556)
+        original = autoctx.in_save
+        autoctx.in_save = False
 
         # roll attack against autoctx.target
         if not (hit or miss):
@@ -159,7 +170,7 @@ class Attack(Effect):
             else:
                 children = self.on_hit(autoctx)
         elif hit:
-            autoctx.queue(f"**To Hit**: Automatic hit!")
+            autoctx.queue("**To Hit**: Automatic hit!")
             # nocrit and crit cancel out
             if crit and not nocrit:
                 did_crit = True
@@ -168,8 +179,10 @@ class Attack(Effect):
                 children = self.on_hit(autoctx)
         else:
             did_hit = False
-            autoctx.queue(f"**To Hit**: Automatic miss!")
+            autoctx.queue("**To Hit**: Automatic miss!")
             children = self.on_miss(autoctx)
+
+        autoctx.in_save = original  # Restore proper crit state (#1556)
 
         return AttackResult(
             attack_bonus=attack_bonus, ac=ac, to_hit_roll=to_hit_roll, adv=adv, did_hit=did_hit, did_crit=did_crit,
