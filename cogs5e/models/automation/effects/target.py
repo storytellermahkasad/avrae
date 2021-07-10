@@ -31,12 +31,16 @@ class Target(Effect):
             for target in autoctx.targets:
                 autoctx.target = AutomationTarget(target)
                 autoctx.metavars['target'] = utils.maybe_alias_statblock(target)  # #1335
+                if target:
+                    autoctx.metavars['targetEffects'] = target.active_effect_names()
                 for iteration_result in self.run_effects(autoctx):
                     result_pairs.append((target, iteration_result))
         elif self.target == 'self':
             target = autoctx.caster
             autoctx.target = AutomationTarget(target)
             autoctx.metavars['target'] = utils.maybe_alias_statblock(target)  # #1335
+            if target:
+                autoctx.metavars['targetEffects'] = target.active_effect_names()
             for iteration_result in self.run_effects(autoctx):
                 result_pairs.append((target, iteration_result))
         else:
@@ -44,6 +48,8 @@ class Target(Effect):
                 target = autoctx.targets[self.target - 1]
                 autoctx.target = AutomationTarget(target)
                 autoctx.metavars['target'] = utils.maybe_alias_statblock(target)  # #1335
+                if target:
+                    autoctx.metavars['targetEffects'] = target.active_effect_names()
             except IndexError:
                 return TargetResult()
             for iteration_result in self.run_effects(autoctx):
@@ -51,6 +57,8 @@ class Target(Effect):
 
         autoctx.target = previous_target
         autoctx.metavars['target'] = utils.maybe_alias_statblock(previous_target)  # #1335
+        if previous_target:
+            autoctx.metavars['targetEffects'] = previous_target.active_effect_names()
 
         targets, results = zip(*result_pairs)  # convenient unzipping :D
         return TargetResult(targets, results)
