@@ -31,6 +31,7 @@ class AutomationContext:
         self.metavars = {
             # caster, targets as default (#1335)
             "caster": aliasing.api.statblock.AliasStatBlock(caster),
+            "casterEffects": caster.active_effect_names() if isinstance(caster, init.Combatant) else None,
             "targets": [maybe_alias_statblock(t) for t in targets]
         }
         self.target = None

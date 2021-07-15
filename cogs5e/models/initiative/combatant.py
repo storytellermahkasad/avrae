@@ -327,6 +327,15 @@ class Combatant(BaseCombatant, StatBlock):
             return self._cache['parsed_effects'].get(key, [])
         return self._cache['parsed_effects']
 
+    def active_effect_names(self):
+        if 'parsed_effect_names' not in self._cache:
+            parsed_effect_names = []
+            for effect in self.get_effects():
+                if effect.name not in parsed_effect_names:
+                    parsed_effect_names.append(effect.name)
+            self._cache['parsed_effect_names'] = parsed_effect_names
+        return self._cache['parsed_effect_names']
+
     def _invalidate_effect_cache(self):
         if 'parsed_effects' in self._cache:
             del self._cache['parsed_effects']
